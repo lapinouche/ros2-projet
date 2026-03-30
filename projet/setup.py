@@ -16,14 +16,14 @@ setup(
     ],
     install_requires=['setuptools'],
     zip_safe=True,
-    maintainer='turtle',
-    maintainer_email='turtle@todo.todo',
-    description='final projet',
-    license='Apach-2.0',
-    #tests_require=['pytest'],
+    maintainer='selene',
+    maintainer_email='selene@todo.todo',
+    description='TODO: Package description',
+    license='Apache-2.0',
+    tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'projet = challange_one.challange_one_node:main',
+            'line_follower = projet.line_following_node:main',
         ],
     },
 )
