@@ -16,17 +16,9 @@ class ObstacleAvoidanceNode(Node):
             self.camera_callback, 
             10)
 
-        self.line_cmd_sub = self.create_subscription(Twist, '/cmd_vel_line', self.line_callback, 10)
-
         # 3. Talk to the actual robot
         self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
 
-        # Publisher pour le mouvement
-        self.latest_line_twist = Twist()
-
-    def line_callback(self, msg):
-        # Just store the line following command for later
-        self.latest_line_twist = msg
 
     def camera_callback(self, msg):
         # 1. Décodage de l'image
@@ -36,7 +28,7 @@ class ObstacleAvoidanceNode(Node):
 
         height, width, _ = image.shape
         # On regarde 60% de l'image pour esquiver les plots
-        roi = image[int(height*0.4):height, :]
+        roi = image[int(height*0.3):height, :]
         roi_height = roi.shape[0] # Get the height of the cropped image
         #roi = image[int(height*0.4):int(height*0.8), :] # to get a better view
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
@@ -59,7 +51,7 @@ class ObstacleAvoidanceNode(Node):
 
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if area > 400:  # Only look at significant objects
+            if area > 380:  # Only look at significant objects
                 x, y, w, h = cv2.boundingRect(cnt)
                 
                 # 2. Shape check: Cylinders are usually taller than they are wide 
@@ -68,7 +60,7 @@ class ObstacleAvoidanceNode(Node):
                 
                 # Tape on floor usually has h < w (aspect ratio < 1)
                 # Cylinder usually has h > w (aspect ratio > 1)
-                if aspect_ratio > 0.8: 
+                if aspect_ratio > 0.75: # 0.7 / 0.8
                     is_obstacle_detected = True
                     
                     # Use moments for THIS specific contour
@@ -77,19 +69,23 @@ class ObstacleAvoidanceNode(Node):
                     
                     twist = Twist()
                     if cx < 320:
-                        twist.angular.z = -0.5 # Turn Right
+                        twist.angular.z = -0.7 # Turn Right (0.5)
+                        twist.linear.x = 0.05  # Slow down while avoiding
+                    
+                    elif cx > 340:
+                        twist.angular.z = 0.7  # Turn Left
+                        twist.linear.x = 0.05
+                    
                     else:
-                        twist.angular.z = 0.5  # Turn Left
+                        twist.angular.z = 0.8  # Turn Left
+                        twist.linear.x = 0.02
                     
                     self.cmd_vel_pub.publish(twist)
                     break # Exit the loop, we found our obstacle!
 
         # 3. If no standing cylinders were found, follow the line
         if not is_obstacle_detected:
-            self.cmd_vel_pub.publish(self.latest_line_twist)
-
-        cv2.imshow("Masque Bleu", mask_blue)
-        cv2.waitKey(1)
+            self.cmd_vel_pub.publish(Twist())
 
         """
         bc = cv2.moments(mask_blue)
@@ -120,6 +116,7 @@ class ObstacleAvoidanceNode(Node):
             # NO OBSTACLE: Just repeat what the line follower said
             self.cmd_vel_pub.publish(self.latest_line_twist)
         """
+
         cv2.imshow("Masque Bleu", mask_blue)
         cv2.waitKey(1)
         
