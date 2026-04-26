@@ -1,139 +1,190 @@
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import CompressedImage
+from sensor_msgs.msg import Image
+from sensor_msgs.msg import LaserScan
+from cv_bridge import CvBridge
 from geometry_msgs.msg import Twist
 import numpy as np
 import cv2
 
+# Use "ros2 launch projet2025 projet.launch.py x_pose:=-0.8 y_pose:=0.9 yaw_angle:=-1.57"
+
 class ObstacleAvoidanceNode(Node):
     def __init__(self):
         super().__init__('obstacle_avoidance')
-        
-        # Subscriber pour l'image du projet 2025
-        self.subscription_img = self.create_subscription(
-            CompressedImage, 
-            '/image_raw/compressed', # Make sure the topic name is correct!
-            self.camera_callback, 
-            10)
-        
-        # Create the subscriber for LIDAR data
-        self.subscription_lidar = self.create_subscription(
-            LaserScan,
-            '/scan',           # The default topic for TurtleBot LiDAR
-            self.scan_callback,
-            10                 # QoS history depth
-        )
-
-        # Publisher to cmd_vel_obstacle
+        # Subscriptions
+        self.sub_lidar = self.create_subscription(LaserScan, '/scan', self.lidar_cb, 10)
+        self.sub_cam = self.create_subscription(Image, '/image_raw', self.cam_cb, 10)
         self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
 
-    def camera_callback(self, msg):
-        # 1. Avoid cylinder
-        max_range = 0.8 # Meters
-        min_range = 0.3 # was 0.1
+        # State Variables (The "Bridge" between sensors)
+        self.lidar_steering_adj = 0.0
+        self.lidar_linear = 0.0
+        self.line_steering = 0.0
+        self.speed = 0.1
+        self.obstacle_active = False
+        self.avoidance_timeout = self.get_clock().now().nanoseconds / 1e9 + 1.5
 
-        # look in front of the robot to avoid obstacle
-        front_left_side = msg.ranges[0:60] 
-        valid_front_left = [l for l in front_left_side if min_range < l < max_range]
+        # line follow parameters
+        self.last_state = "RV"
+        self.last_error = 0
+        self.bridge = CvBridge()
 
-        front_right_side = msg.ranges[300:360]
-        valid_front_right = [r for r in front_right_side if min_range < r < max_range]
+        # Timer: This runs the logic 10 times per second
+        self.timer = self.create_timer(0.1, self.control_loop)
 
-        # look at the direct left and right to the robot (if object, don't turn yet)
-        left_side = msg.ranges[80:100] 
-        valid_left = [l for l in left_side if min_range < l < max_range]
+    def lidar_cb(self, msg):
+        # Filter helper: returns the shortest valid distance in a zone
+        def get_min_dist(zone):
+            valid = [d for d in zone if 0.1 < d < 0.8] # 0.8m threshold
+            return min(valid) if valid else float('inf')
 
-        right_side = msg.ranges[260:280]
-        valid_right = [r for r in right_side if min_range < r < max_range]
+        # Define strict detection zones (indices for TurtleBot3)
+        front_ranges = msg.ranges[0:20] + msg.ranges[340:360] # Front: -20 to +20 degrees
+        left_ranges = msg.ranges[20:70] # Left: 20 to 70 degrees
+        right_ranges = msg.ranges[290:340] # Right: 290 to 340 degrees
 
-        is_obstacle_detected = False
-        twist = Twist()
+        dist_front = get_min_dist(front_ranges)
+        dist_left = get_min_dist(left_ranges)
+        dist_right = get_min_dist(right_ranges)
 
-        if valid_front_left:
-            if len(valid_left) != 0:
-                dist_left = sum(valid_front_left) / len(valid_front_left)
-                self.get_logger().info(f"dist_front_left : {dist_left}")
-                is_obstacle_detected = True
-            else:
-                pass
+        self.get_logger().info(f"dist_front = {dist_front}")
+        self.get_logger().info(f"dist_left = {dist_left}")
+        self.get_logger().info(f"dist_right = {dist_right}")
 
-            twist.angular.z = -1 # (0.7) Turn Right
-            twist.linear.x = 0.03  # Slow down while avoiding
+        # 3. Logic Priority (Emergency Stop -> Turn -> Cruise)
+        if dist_front < 0.2:
+            self.obstacle_active = True
+            self.lidar_linear = -0.05
+            # Decide to steer away
+            self.lidar_steering_adj = 0.8 if dist_right < dist_left else -0.8 # Steer slightly left
 
-            self.cmd_vel_pub.publish(twist)
-            break
+        elif dist_front < 0.8:
+            self.obstacle_active = True
+            self.lidar_linear = 0.02
+            self.lidar_steering_adj = 0.7 if dist_right < dist_left else -0.7
         
-        elif valid_left:
-            if len(valid_left) != 0:
-                dist_left = sum(valid_left) / len(valid_left)
-                self.get_logger().info(f"dist_left : {dist_left}")
-                is_obstacle_detected = True
-            else:
-                pass
+        elif dist_left < 0.5:
+            self.obstacle_active = True
+            self.lidar_linear = 0.05
+            self.lidar_steering_adj = -0.4
 
-            if dist_left > 3:
-                is_obstacle_detected = False # Safe distance, try to keep between the line
-                twist.linear.x = 0.07  # Keep going
-            else:
-                twist.angular.z = -0.3 # turn a little more
-                twist.linear.x = 0.04  # Slow down !
+        elif dist_right < 0.5:
+            self.obstacle_active = True
+            self.lidar_linear = 0.05
+            self.lidar_steering_adj = 0.4
 
-            self.cmd_vel_pub.publish(twist)
-            break
+        else:
+            self.obstacle_active = False
+            self.lidar_steering_adj = 0.0
+        
+    def cam_cb(self, msg):
+        cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+        h, w, _ = cv_image.shape
+        #hsv_full = cv2.cvtColor(cv_image, cv2.COLOR_BGR2HSV)
 
-            
-        elif valid_front_right:
-            if len(valid_right) != 0:
-                dist_right = sum(valid_front_right) / len(valid_front_right)
-                self.get_logger().info(f"dist_front_right : {dist_right}")
-                is_obstacle_detected = True
-            else:
-                pass
+        # ROI : On prend une zone un peu plus haute pour voir venir la ligne
+        roi = cv_image[int(h * 0.6):h, :]
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
 
-            twist.angular.z = 1 # (0.7) Turn Left
-            twist.linear.x = 0.03  # Slow down while avoiding
+        # --- MASQUES HSV ---
+        mask_red1 = cv2.inRange(hsv, (0, 100, 50), (10, 255, 255))
+        mask_red2 = cv2.inRange(hsv, (160, 100, 50), (180, 255, 255))
+        mask_red = cv2.bitwise_or(mask_red1, mask_red2)
 
-            self.cmd_vel_pub.publish(twist)
-            break
+        mask_green = cv2.inRange(hsv, (35, 50, 50), (90, 255, 255))
 
-        elif valid_right
-            if len(valid_right) != 0:
-                dist_right = sum(valid_right) / len(valid_right)
-                self.get_logger().info(f"dist_left : {dist_right}")
-                is_obstacle_detected = True
-            else:
-                pass
+        # Moments
+        M_red = cv2.moments(mask_red)
+        M_green = cv2.moments(mask_green)
 
-            if dist_right > 3:
-                is_obstacle_detected = False # Safe distance, try to keep between the line
-                twist.linear.x = 0.07  # Keep going
-            else:
-                twist.angular.z = -0.3 # turn a little more
-                twist.linear.x = 0.04  # Slow down !
+        kp = 0.0015 # 0.02 Proportional gain
+        kd = 0.025 # 0.01 Derivate gain
 
-            self.cmd_vel_pub.publish(twist)
-            break
+        # CAS 1 : On voit les deux lignes
+        if M_red['m00'] > 2000 and M_green['m00'] > 2000:
+            cx_red = int(M_red['m10'] / M_red['m00'])
+            cx_green = int(M_green['m10'] / M_green['m00'])
+            cible = (cx_red + cx_green) / 2
+            error = cible - (w / 2)
                 
-        # 3. If no standing cylinders were found, keep following the line
-        if not is_obstacle_detected:
-            twist.linear.x = 0.0
-            twist.angular.z = 0.0
-            # 1. Décodage de l'image
+            self.line_steering = -(float(error) / 100.0) # 100.0
+
+        # CAS 2 : On voit seulement la ligne rouge (Le vert a disparu)
+        elif M_red['m00'] > 2000:
+            cx_red = int(M_red['m10'] / M_red['m00'])
+            cy_red = int(M_red['m01'] / M_red['m00'])
+
+            if self.last_state != "R":
+                self.last_error = cx_red - 80
+
+            self.last_state = "R"
+
+            error = cx_red - 80
+            derivative = error - self.last_error
+
+            if cy_red > 40:
+                severity = (cy_red - 38)/20.0
+                self.line_steering = 0.7 + (0.5*severity)
+            else:
+                pd_steering = -(error*kp + derivative*kd)
+                self.line_steering = pd_steering 
+                self.last_error = error
             
-            # 2. Masques de couleur (line_following)
-            # Ajustez ces seuils si les couleurs sur le terrain réel diffèrent
+        # CAS 3 : On voit seulement la ligne verte (Le rouge a disparu)
+        elif M_green['m00'] > 2000:
+            cx_green = int(M_green['m10'] / M_green['m00'])
+            cy_green = int(M_green['m01'] / M_green['m00'])
 
-            #####
-            ## TO BE DONE (or to be delet if using linear.x = 0 and angular.z = 0)
-            #####
+            if self.last_state != "V":
+                self.last_error = cx_green - 80
 
-            #twist.linear.x = 0.0
-            #twist.angular.z = 0.0
-            self.cmd_vel_pub.publish(twist)
+            self.last_state = "V"
+            error = cx_green - 80
+            derivative = error - self.last_error
 
-        #cv2.imshow("Masque Bleu", mask_blue)
-        cv2.waitKey(1)
-        
+            if cy_green > 40:
+                severity = (cy_green - 38)/20.0
+                self.line_steering = -(0.7 + (0.5*severity))
+            else:
+                pd_steering = -(error*kp + derivative*kd)
+                self.line_steering = pd_steering 
+                self.last_error = error
+            
+
+        else:
+            self.get_logger().info("Lines lost - searching")
+            self.line_steering *= 0.9
+
+    def control_loop(self):
+        twist = Twist()
+        now = self.get_clock().now().nanoseconds / 1e9
+        max_turn_speed = 0.5
+
+        is_avoiding = self.obstacle_active or (now < self.avoidance_timeout)
+
+        if is_avoiding: #self.obstacle_active
+            # PRIORITY: Obstacle avoidance
+            # We combine the line following AND a nudge from LiDAR
+            combined_steering = (self.line_steering*0.5) + self.lidar_steering_adj
+            twist.angular.z = max(min(combined_steering, max_turn_speed), -max_turn_speed)
+            if self.lidar_linear:
+                twist.linear.x = self.lidar_linear
+            else:
+                twist.linear.x = 0.05 
+            
+        else:
+            if self.last_state == "R":
+                twist.linear.x = 0.05   # 0.15
+                twist.angular.z = self.line_steering - 0.1
+            elif self.last_state == "V":
+                twist.linear.x = 0.05   # 0.15
+                twist.angular.z = self.line_steering + 0.1
+            else:                       #self.last_state == "RV"
+                twist.linear.x = 0.08
+                twist.angular.z = self.line_steering
+
+        self.cmd_vel_pub.publish(twist)
 
 def main(args=None):
     rclpy.init(args=args)
