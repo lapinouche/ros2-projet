@@ -1,6 +1,7 @@
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
+from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import Twist
 import numpy as np
 from cv_bridge import CvBridge
@@ -9,91 +10,39 @@ import cv2
 class LineFollowerNode(Node):
     def __init__(self):
         super().__init__('line_follower_node')
-
         self.bridge = CvBridge()
-        
-        # Subscriber pour l'image
-        self.subscription = self.create_subscription(Image, '/image_raw', self.listener_callback, 10)
-
-        # PARAMÈTRE : Pour choisir la direction au rond-point
+        self.sub_img = self.create_subscription(Image, '/image_raw', self.listener_callback, 10)
+        self.pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.sub_scan = self.create_subscription(LaserScan, '/scan', self.scan_callback, 10)
+        self.obstacle_detecte = False
         self.declare_parameter('direction', 'left')
-        
-        # Publisher pour le mouvement
-        self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
-
-        # chequer la derniere ligne visible
-        self.last_state = "RV" # ligne rouge et vert visible
-        self.in_roundabout = False # passe au mode rond point une fois detecter
-        self.chosen_side = "right"
-        
-        self.get_logger().info("Nœud de suivi de ligne opérationnel avec contrôle CY !")
-
-        # dimensionnement de la fenetre de la camera
-        cv2.namedWindow("Vision", cv2.WINDOW_NORMAL) # nomee la fenetre
-        cv2.resizeWindow("Vision", 300, 300) # la redimensionner
-
-    def check_roundabout_entry(self, mask_combined, mask_red_full, mask_green_full, h, w):
-        # Slice the combined mask to look at the "horizon"
-        top_zone = mask_combined[int(h*0.3):int(h*0.6), :]
-        
-        contours, _ = cv2.findContours(top_zone, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        for cnt in contours:
-            if cv2.contourArea(cnt) > 400:
-                if len(cnt) >= 5:
-                    # 1. Shape Detection (Ellipse)
-                    ellipse = cv2.fitEllipse(cnt)
-                    (cx, cy), (w_e, h_e), angle = ellipse
-                    
-                    # 2. Centering
-                    is_centered = abs(cx - (w / 2)) < (w * 0.2)
-                    
-                    # 3. Color Verification
-                    # We check the original red/green masks in the same area
-                    # to ensure BOTH colors are present in this blob
-                    roi_red = mask_red_full[int(h*0.3):int(h*0.6), :]
-                    roi_green = mask_green_full[int(h*0.3):h, :] # Using h for green just in case
-                    
-                    has_red = cv2.countNonZero(roi_red) > 200
-                    has_green = cv2.countNonZero(roi_green) > 200
-
-                    if is_centered and has_red and has_green:
-                        self.get_logger().info("Roundabout confirmed: Red and Green halves detected!")
-                        return True
-        return False
-
+        self.get_logger().info("Nœud de suivi de ligne démarré.")
+    
     def listener_callback(self, msg):
         try:
+
+            if self.obstacle_detecte:
+                self.get_logger().info("Obstacle détecté, arrêt du robot.")
+                return # On ne fait rien tant qu'on a pas traité l'obstacle
+            
             cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
             h, w, _ = cv_image.shape
-            #hsv_full = cv2.cvtColor(cv_image, cv2.COLOR_BGR2HSV)
 
-            # ROI : On prend une zone un peu plus haute pour voir venir la ligne
-            roi = cv_image[int(h * 0.4):h, :]
+            self.get_logger().info(f"Dimensions : {h} x {w}")
+            
+            # Au lieu de h/2 (qui voit trop loin), utilise h*0.7 ou h*0.75
+            roi = cv_image[int(h * 0.6):h, 0:w]
             hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-
+        
             # --- MASQUES HSV ---
             mask_red1 = cv2.inRange(hsv, (0, 100, 50), (10, 255, 255))
             mask_red2 = cv2.inRange(hsv, (160, 100, 50), (180, 255, 255))
-            mask_red_full = cv2.bitwise_or(mask_red1, mask_red2)
-            mask_green_full = cv2.inRange(hsv, (35, 50, 50), (90, 255, 255))
-            
+            mask_red = cv2.bitwise_or(mask_red1, mask_red2)
+            mask_green = cv2.inRange(hsv, (35, 50, 50), (90, 255, 255))
 
-            # --- NETTOYAGE ---
-            kernel = np.ones((5, 5), np.uint8)
-            mask_red_full = cv2.morphologyEx(mask_red_full, cv2.MORPH_OPEN, kernel)
-            mask_green_full = cv2.morphologyEx(mask_green_full, cv2.MORPH_OPEN, kernel)
-            
-            # --- ROND POINT ---
-            mask_combined = cv2.bitwise_or(mask_red_full, mask_green_full)
-            mask_combined = cv2.dilate(mask_combined, kernel, iterations=2)
-            detected = self.check_roundabout_entry(mask_combined, mask_red_full, mask_green_full, h, w)
-            if detected:
-                self.in_roundabout = True
-
-            # --- REDIMENSIONNEMENT ---
-            mask_red = mask_red_full[int(h * 0.2):h, :]
-            mask_green = mask_green_full[int(h * 0.2):h, :]
+            # 1. On crée un masque global (tout ce qui est coloré)
+            mask_total = cv2.bitwise_or(mask_red, mask_green)
+            M_total = cv2.moments(mask_total)
 
             # Moments
             M_red = cv2.moments(mask_red)
@@ -105,84 +54,81 @@ class LineFollowerNode(Node):
             # --- LOGIQUE DE MOUVEMENT MODIFIÉE ---
             
             # CAS 1 : On voit les deux lignes
-            if M_red['m00'] > 2000 and M_green['m00'] > 2000:
+            if M_red['m00'] > 0 and M_green['m00'] > 0:
+
                 cx_red = int(M_red['m10'] / M_red['m00'])
                 cx_green = int(M_green['m10'] / M_green['m00'])
                 cible = (cx_red + cx_green) / 2
                 error = cible - (w / 2)
-                self.last_state = "RV"
                 
                 twist.linear.x = 0.1
                 twist.angular.z = -float(error) / 100.0
 
             # CAS 2 : On voit seulement la ligne rouge (Le vert a disparu)
-            elif M_red['m00'] > 2000:
-                cy_red = int(M_red['m01'] / M_red['m00']) # Hauteur de la ligne dans le ROI
-                self.last_state = "R"
-                
-                if direction_choisie == 'left':
-                    # On ne tourne que si la ligne rouge est assez BASSE (proche du robot)
-                    if cy_red > 45: 
-                        twist.linear.x = 0.08
-                        twist.angular.z = 0.8  # Virage gauche
-                    else:
-                        twist.linear.x = 0.1
-                        twist.angular.z = 0.0  # On attend d'être plus près
+            elif M_red['m00'] > 0:
+
+                cx_red = int(M_red['m10'] / M_red['m00'])
+                cy_red = int(M_red['m01'] / M_red['m00'])
+                error = cx_red - (w / 4)
+                v_auto = abs(float(error)) / 200.0
+
+                if cy_red > h / 8 : 
+                    twist.linear.x = v_auto * 0.01
+                    twist.angular.z = v_auto # Virage gauche
+
                 else:
-                    # On longe la ligne rouge pour rester sur la piste
-                    cx_red = int(M_red['m10'] / M_red['m00'])
-                    error = cx_red - 80
-                    twist.linear.x = 0.08
-                    twist.angular.z = -float(error) / 50.0 
+                    twist.linear.x = 0.1
+                    twist.angular.z = 0.0
 
             # CAS 3 : On voit seulement la ligne verte (Le rouge a disparu)
-            elif M_green['m00'] > 2000:
+            elif M_green['m00'] > 0:
+
+                cx_green = int(M_green['m10'] / M_green['m00'])
                 cy_green = int(M_green['m01'] / M_green['m00'])
-                self.last_state = "V"
+                error = cx_green - (w * 3 / 4)
+                v_auto = abs(float(error)) / 200.0
                 
-                if direction_choisie == 'right':
-                    if cy_green > 45:
-                        twist.linear.x = 0.08
-                        twist.angular.z = -0.8 # Virage droite
-                    else:
-                        twist.linear.x = 0.1
-                        twist.angular.z = 0.0
+                if cy_green > h / 8:
+                    twist.linear.x = v_auto * 0.01
+                    twist.angular.z = - v_auto
                 else:
-                    # On longe la ligne verte
-                    cx_green = int(M_green['m10'] / M_green['m00'])
-                    error = cx_green - (w - 80)
-                    twist.linear.x = 0.08
-                    twist.angular.z = float(error) / 50.0 
+                    twist.linear.x = 0.1
+                    twist.angular.z = 0.0
 
             # CAS 4 : Rien du tout
             else:
-                if self.in_roundabout:
-                    self.get_logger().info("rond point detecter !!!")
-                    twist.linear.x = 0.05
-                    twist.angular.z = -1.2 if self.chosen_side == "right" else 1.2
+                if direction_choisie == 'left':
+                    twist.linear.x = 0.1
+                    twist.angular.z = 0.7 # Tourne à gauche sur place
+                if direction_choisie == 'right':
+                    twist.linear.x = 0.1
+                    twist.angular.z = -0.7 # Tourne à droite sur place
 
-                    if M_red['m00'] > 5000 or M_green['m00'] > 5000:
-                        self.in_roundabout = False
-
-                elif self.last_state == "R":
-                    twist.linear.x = 0.05 # 0.15
-                    twist.angular.z = -0.3
-                elif self.last_state == "V":
-                    twist.linear.x = 0.05 # 0.15
-                    twist.angular.z = 0.3
-                elif self.last_state == "RV":
-                    twist.linear.x = 0.08
-                    twist.angular.z = 0.0
-
-            self.cmd_vel_pub.publish(twist)
+            self.pub.publish(twist)
 
             # Affichage Debug
             cv2.imshow("Masques", cv2.bitwise_or(mask_red, mask_green))
-            cv2.imshow("Vision", cv_image) # l'afficher
             cv2.waitKey(1)
 
         except Exception as e:
             self.get_logger().error(f"Erreur : {e}")
+    
+    def scan_callback(self, msg):
+        # On regarde les distances devant le robot
+        front_ranges = msg.ranges[0 : 20] + msg.ranges[340 : 360]  # 20 degrés à gauche et à droite
+        ok_distance = [dist for dist in front_ranges if dist < msg.range_max and dist > msg.range_min]
+
+        # 4. On prend la décision.
+        if ok_distance and min(ok_distance) < 0.3: # Si un objet est à moins de 30cm
+                self.obstacle_detecte = True
+                stop_twist = Twist()
+                self.pub.publish(stop_twist)
+                return # On sort de la fonction
+            
+        # Si on arrive ici, c'est que c'est libre
+        self.obstacle_detecte = False
+
+
 
 def main(args=None):
     rclpy.init(args=args)
@@ -197,4 +143,4 @@ def main(args=None):
         cv2.destroyAllWindows()
 
 if __name__ == '__main__':
-    main()   
+    main()
