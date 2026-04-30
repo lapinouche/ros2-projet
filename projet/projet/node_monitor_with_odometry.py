@@ -1,5 +1,3 @@
-# run "ros2 run tf2_ros tf2_echo odom base_link" to see Translation value [X, Y, Yaw]
-
 import rclpy
 from rclpy.node import Node
 from nav_msgs.msg import Odometry
@@ -17,12 +15,14 @@ class NodeMonitor(Node):
         # Define your sequence of checkpoints and corresponding nodes
         # Format: (x, y, yaw, "node_script.py")
         self.challenges = [
-            #(0.0, 0.0, None, "line_following_node.py"),
-            # (1.216, 1.300, 0.010, "obstacle_avoidance.py"),
-            (1.244, 1.500, 0.010, "obstacle_avoidance.py"),
-            (0.3, 1.9, 0.010, "corridor_node.py"),  # Example placeholder
-            (-0.4, 1.5, None, "line_following_node.py")
+            (1.244, 1.500, 0.010, "LINE"),
+            (0.3, 1.9, 0.010, "OBSTACLE"),
+            (-0.4, 1.5, None, "CORRIDOR"),  # Example placeholder
+            (-0.2, 0.5, None, "LINE"),
+            (99.0, 99.0, None, "MOTION") # X and Y to change
         ]
+        # (1.216, 1.300, 0.010, "obstacle_avoidance.py"),
+        #(-0.2, 0.5, None, "MOTION") # X and Y to change
 
         self.current_step = 0
         self.active_process = None
@@ -32,12 +32,14 @@ class NodeMonitor(Node):
         self.latest_line_twist = Twist()
         self.latest_obs_twist = Twist()
         self.latest_corr_twist = Twist()
+        self.latest_hmc_twist = Twist()
 
         # Subscriptions
         self.subscription = self.create_subscription(Odometry, '/odom', self.odom_callback, 10) # Subscribe to Odometry to track robot position
         self.line_sub = self.create_subscription(Twist, '/cmd_vel_line', self.line_callback, 10)
         self.obs_sub = self.create_subscription(Twist, '/cmd_vel_obstacle', self.obs_callback, 10)
         self.corr_sub = self.create_subscription(Twist, '/cmd_vel_corridor', self.corr_callback, 10)
+        self.hmc_sub = self.create_subscription(Twist, '/cmd_vel_hmc', self.hmc_callback, 10)
         self.cam_sub = self.create_subscription(CompressedImage, '/image_raw/compressed', self.cam_callback, 10)
 
         # Publisher to the actual robot hardware/simulator
@@ -46,9 +48,6 @@ class NodeMonitor(Node):
         
         # Timer to publish at a fixed rate (e.g., 10Hz)
         self.timer = self.create_timer(0.1, self.publish_decision) # 0.1 for 10Hz
-
-        # Start the first node immediately
-        self.start_next_challenge()
 
     def odom_callback(self, msg):
         if self.current_step >= len(self.challenges):
@@ -63,25 +62,6 @@ class NodeMonitor(Node):
         if distance < self.threshold:
             self.get_logger().info(f"Transitioning at distance: {distance:.2f}")
             self.current_step += 1
-            self.start_next_challenge()
-
-    def start_next_challenge(self):
-        # 1. Kill the previous node if it's running
-        if self.active_process:
-            self.get_logger().info("Terminationg previous process...")
-            self.active_process.terminate()
-            self.active_process.wait()
-
-        # 2. Check if we have more challenges left
-        if self.current_step < len(self.challenges):
-            script_name = self.challenges[self.current_step][3]
-            self.get_logger().info(f"Starting step {self.current_step}: {script_name}")
-            
-            # 3. Launch the next node as a subprocess
-            # Ensure your .py files are executable or use 'python3'
-            self.active_process = subprocess.Popen(['python3', script_name])
-        else:
-            self.get_logger().info("All challenges completed!")
 
     def line_callback(self, msg):
         self.latest_line_twist = msg
@@ -91,6 +71,9 @@ class NodeMonitor(Node):
 
     def corr_callback(self, msg):
         self.latest_corr_twist = msg
+
+    def hmc_callback(self, msg):
+        self.latest_hmc_twist = msg
 
     def cam_callback(self, msg): # camera callback to save the image
         self.latest_raw_image = msg
@@ -103,17 +86,28 @@ class NodeMonitor(Node):
         state_msg = Int32()
         state_msg.data = self.current_step # accept only integer !
 
-        if self.current_step == 0 or self.current_step == 3:
-            out_msg = self.latest_line_twist
+        if self.current_step < len(self.challenges):
+            current_script = self.challenges[self.current_step][3]
 
-        elif self.current_step == 1:
-            out_msg = self.latest_obs_twist
-            self.get_logger().info("Priority: Obstacle Avoidance")
+            if "LINE" in current_script:
+                self.get_logger().info("Priority: Line Following")
+                out_msg = self.latest_line_twist
 
-        elif self.current_step == 2:
-            self.get_logger().info("Priority: Corridor")
-            out_msg = self.latest_corr_twist
-        
+            elif "OBSTACLE" in current_script:
+                self.get_logger().info("Priority: Obstacle Avoidance")
+                out_msg = self.latest_obs_twist
+            
+            elif "CORRIDOR" in current_script:
+                self.get_logger().info("Priority: Corridor")
+                out_msg = self.latest_corr_twist
+            
+            elif "MOTION" in current_script:
+                self.get_logger().info("Last challange !")
+                out_msg = self.latest_hmc_twist
+
+            # Log only occasionally to avoid flooding the terminal
+            self.get_logger().info(f"Step {self.current_step} active: {current_script}", once=True)
+
         else:
             # Safety stop if out of bounds
             out_msg = Twist()
@@ -135,8 +129,6 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        if node.active_process:
-            node.active_process.terminate()
         node.destroy_node()
         rclpy.shutdown()
 
