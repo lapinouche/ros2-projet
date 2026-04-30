@@ -15,10 +15,10 @@ class NodeMonitor(Node):
         # Define your sequence of checkpoints and corresponding nodes
         # Format: (x, y, yaw, "node_script.py")
         self.challenges = [
-            (1.244, 1.500, 0.010, "LINE"),
-            (0.3, 1.9, 0.010, "OBSTACLE"),
-            (-0.4, 1.5, None, "CORRIDOR"),  # Example placeholder
-            (-0.2, 0.5, None, "LINE"),
+            (1.0, 1.5, 0.010, "LINE"), # 1.244, 1.5
+            (-0.4, 1.5, 0.010, "OBSTACLE"), #  0.3, 1.9
+            (-0.4, 0.6, None, "CORRIDOR"),  # -0.4, 1.5 Example placeholder
+            (-0.2, 0.9, None, "LINE"),
             (99.0, 99.0, None, "MOTION") # X and Y to change
         ]
         # (1.216, 1.300, 0.010, "obstacle_avoidance.py"),
