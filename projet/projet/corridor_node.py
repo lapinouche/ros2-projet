@@ -20,7 +20,7 @@ class CorridorNode(Node):
 
 
     def scan_callback(self, msg):
-        max_range = 0.8 # Meters
+        max_range = 0.5 # Meters
         min_range = 0.3 # was 0.1
 
         left_side = msg.ranges[30:60] # was 85:95
