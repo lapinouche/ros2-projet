@@ -17,6 +17,7 @@ class LineFollowerNode(Node):
         self.obstacle_detecte = False
         self.declare_parameter('direction', 'left')
         self.get_logger().info("Nœud de suivi de ligne démarré.")
+        self.err = 0.0
     
     def listener_callback(self, msg):
         try:
@@ -71,6 +72,7 @@ class LineFollowerNode(Node):
                 cy_red = int(M_red['m01'] / M_red['m00'])
                 error = cx_red - (w / 4)
                 v_auto = abs(float(error)) / 200.0
+                self.err = v_auto
 
                 if cy_red > h / 8 : 
                     twist.linear.x = v_auto * 0.01
@@ -87,6 +89,7 @@ class LineFollowerNode(Node):
                 cy_green = int(M_green['m01'] / M_green['m00'])
                 error = cx_green - (w * 3 / 4)
                 v_auto = abs(float(error)) / 200.0
+                self.err = v_auto
                 
                 if cy_green > h / 8:
                     twist.linear.x = v_auto * 0.01
@@ -97,12 +100,8 @@ class LineFollowerNode(Node):
 
             # CAS 4 : Rien du tout
             else:
-                if direction_choisie == 'left':
-                    twist.linear.x = 0.1
-                    twist.angular.z = 0.7 # Tourne à gauche sur place
-                if direction_choisie == 'right':
-                    twist.linear.x = 0.1
-                    twist.angular.z = -0.7 # Tourne à droite sur place
+                twist.linear.x = 0.0
+                twist.angular.z = 0.0
 
             self.pub.publish(twist)
 
