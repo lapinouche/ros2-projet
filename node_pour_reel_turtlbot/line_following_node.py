@@ -13,6 +13,7 @@ class LineFollowerNode(Node):
     def __init__(self):
         super().__init__('line_follower_node')
         #self.bridge = CvBridge()
+        #self.sub_img = self.create_subscription(Image, '/camera/image_raw', self.listener_callback, 10)
         self.sub_img = self.create_subscription(CompressedImage, '/camera/image_raw/compressed', self.listener_callback, 10)
         self.pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.sub_scan = self.create_subscription(LaserScan, '/scan', self.scan_callback, 10)
@@ -21,11 +22,11 @@ class LineFollowerNode(Node):
         self.turning = False
         self.last_line = "RV"
         self.roundabout_cooldown = 0  # To prevent flickering detection
-        self.declare_parameter('direction', 'left')
+        self.declare_parameter('direction', 'right')
         self.get_logger().info("Nœud de suivi de ligne démarré.")
 
         # Make node check that it's her time to publish
-        self.current_state = -1
+        self.current_state = 0
         self.state_robot = self.create_subscription(Int32, '/robot_state', self.state_callback, 10)
 
     def state_callback(self, msg):
@@ -34,7 +35,7 @@ class LineFollowerNode(Node):
     def listener_callback(self, msg):
         self.get_logger().info("node running")
         if self.current_state not in [0, 3]:
-            #self.get_logger().info("current_state incorrect")
+            self.get_logger().info("current_state incorrect")
             return
         try:
             if self.obstacle_detecte:
@@ -44,19 +45,23 @@ class LineFollowerNode(Node):
             #cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
             np_arr = np.frombuffer(msg.data, np.uint8)
             cv_image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            #cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
             h, w, _ = cv_image.shape
 
-            self.get_logger().info(f"Dimensions : {h} x {w}")
+            #self.get_logger().info(f"Dimensions : {h} x {w}")
             
             # Au lieu de h/2 (qui voit trop loin), utilise h*0.7 ou h*0.75
             roi = cv_image[int(h * 0.6):h, 0:w]
             hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         
             # --- MASQUES HSV ---
-            mask_red1 = cv2.inRange(hsv, (0, 100, 50), (10, 255, 255))
-            mask_red2 = cv2.inRange(hsv, (160, 100, 50), (180, 255, 255))
+            #mask_red1 = cv2.inRange(hsv, (0, 60, 20), (0, 255, 255))
+            #mask_red2 = cv2.inRange(hsv, (170, 40, 20), (170, 255, 255))
+
+            mask_red1 = cv2.inRange(hsv, (0, 50, 30), (15, 255, 255))
+            mask_red2 = cv2.inRange(hsv, (160, 50, 30), (180, 255, 255))
             mask_red = cv2.bitwise_or(mask_red1, mask_red2)
-            mask_green = cv2.inRange(hsv, (35, 50, 50), (90, 255, 255))
+            mask_green = cv2.inRange(hsv, (25, 60, 60), (80, 255, 255))
 
             # 1. On crée un masque global (tout ce qui est coloré)
             mask_total = cv2.bitwise_or(mask_red, mask_green)
@@ -76,6 +81,9 @@ class LineFollowerNode(Node):
                 self.last_line = "RV"
                 cx_red = int(M_red['m10'] / M_red['m00'])
                 cx_green = int(M_green['m10'] / M_green['m00'])
+
+                self.get_logger().info(f"cx_red = {cx_red}")
+                self.get_logger().info(f"cx_green = {cx_green}")
 
                 dist_between_lines = abs(cx_red - cx_green)
                 if dist_between_lines < 25:
@@ -99,7 +107,7 @@ class LineFollowerNode(Node):
                 cible = (cx_red + cx_green) / 2
                 error = cible - (w / 2)
                 
-                twist.linear.x = 0.1
+                twist.linear.x = 0.08
                 twist.angular.z = -float(error) / 100.0
 
             # CAS 2 : On voit seulement la ligne rouge (Le vert a disparu)
@@ -108,15 +116,14 @@ class LineFollowerNode(Node):
                 cx_red = int(M_red['m10'] / M_red['m00'])
                 cy_red = int(M_red['m01'] / M_red['m00'])
                 error = cx_red - (w / 4)
-                #self.get_logger().info(f"error : {error}")
                 v_auto = abs(float(error)) / 200.0
 
-                if cy_red > h / 8 : 
+                if cy_red > h / 4 : # h/8 
                     twist.linear.x = v_auto * 0.01
                     twist.angular.z = v_auto # Virage gauche
 
                 else:
-                    twist.linear.x = 0.1
+                    twist.linear.x = 0.08
                     twist.angular.z = 0.0
 
             # CAS 3 : On voit seulement la ligne verte (Le rouge a disparu)
@@ -127,7 +134,7 @@ class LineFollowerNode(Node):
                 error = cx_green - (w * 3 / 4)
                 v_auto = abs(float(error)) / 200.0
                 
-                if cy_green > h / 8:
+                if cy_green > h / 4: # h/8
                     twist.linear.x = v_auto * 0.01
                     twist.angular.z = - v_auto
                 else:
@@ -137,18 +144,19 @@ class LineFollowerNode(Node):
             # CAS 4 : Rien du tout
             else:
                 if self.last_line == "RV" :
-                    twist.linear.x = 0.1
+                    twist.linear.x = 0.05
                     twist.angular.z = 0.0 # continuer tout droit
                 elif self.last_line == "R":
-                    twist.linear.x = 0.1
-                    twist.angular.z = -0.7 # Tourne à gauche sur place
+                    twist.linear.x = 0.05
+                    twist.angular.z = -0.4 # 0.7  Tourne à gauche sur place
                 elif self.last_line == "V":
-                    twist.linear.x = 0.1
-                    twist.angular.z = 0.7 # Tourne à droite sur place
+                    twist.linear.x = 0.05
+                    twist.angular.z = 0.4 # Tourne à droite sur place
 
             self.pub.publish(twist)
 
             # Affichage Debug
+            cv2.imshow("Camera lfn", cv_image)
             cv2.imshow("Masques", cv2.bitwise_or(mask_red, mask_green))
             cv2.waitKey(1)
 
