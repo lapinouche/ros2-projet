@@ -1,17 +1,19 @@
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import Image
+# from sensor_msgs.msg import Image
+from sensor_msgs.msg import CompressedImage
 from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import Twist
 import numpy as np
-from cv_bridge import CvBridge
+# from cv_bridge import CvBridge
 import cv2
 
 class LineFollowerNode(Node):
     def __init__(self):
         super().__init__('line_follower_node')
-        self.bridge = CvBridge()
-        self.sub_img = self.create_subscription(Image, '/image_raw', self.listener_callback, 10)
+        # self.bridge = CvBridge()
+        # self.sub_img = self.create_subscription(Image, '/image_raw', self.listener_callback, 10)
+        self.sub_img = self.create_subscription(CompressedImage, '/camera/image_raw/compressed', self.listener_callback, 10)
         self.pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.sub_scan = self.create_subscription(LaserScan, '/scan', self.scan_callback, 10)
         self.obstacle_detecte = False
@@ -19,12 +21,12 @@ class LineFollowerNode(Node):
         self.get_logger().info("Nœud de suivi de ligne démarré.")
     
     def listener_callback(self, msg):
-        try:
             if self.obstacle_detecte:
                 self.get_logger().info("Obstacle détecté, arrêt du robot.")
                 return # On ne fait rien tant qu'on a pas traité l'obstacle
             
-            cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            # cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            cv_image = cv2.imdecode(np.frombuffer(msg.data, np.uint8), cv2.IMREAD_COLOR)
             h, w, _ = cv_image.shape
 
             self.get_logger().info(f"Dimensions : {h} x {w}")
@@ -34,8 +36,8 @@ class LineFollowerNode(Node):
             hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         
             # --- MASQUES HSV ---
-            mask_red1 = cv2.inRange(hsv, (0, 50, 30), (15, 255, 255))
-            mask_red2 = cv2.inRange(hsv, (160, 50, 30), (180, 255, 255))
+            mask_red1 = cv2.inRange(hsv, (0, 100, 50), (10, 255, 255))
+            mask_red2 = cv2.inRange(hsv, (160, 100, 50), (180, 255, 255))
             mask_red = cv2.bitwise_or(mask_red1, mask_red2)
             mask_green = cv2.inRange(hsv, (35, 50, 50), (90, 255, 255))
 
@@ -70,7 +72,6 @@ class LineFollowerNode(Node):
                 cy_red = int(M_red['m01'] / M_red['m00'])
                 error = cx_red - (w / 4)
                 v_auto = abs(float(error)) / 200.0
-                self.err = v_auto
 
                 if cy_red > h / 4 : 
                     twist.linear.x = v_auto * 0.01
@@ -87,7 +88,6 @@ class LineFollowerNode(Node):
                 cy_green = int(M_green['m01'] / M_green['m00'])
                 error = cx_green - (w * 3 / 4)
                 v_auto = abs(float(error)) / 200.0
-                self.err = v_auto
                 
                 if cy_green > h / 4:
                     twist.linear.x = v_auto * 0.01
@@ -98,8 +98,8 @@ class LineFollowerNode(Node):
 
             # CAS 4 : Rien du tout
             else:
-                twist.linear.x = 0.0
-                twist.angular.z = 0.0
+                twist.linear.x = 0.1
+                twist.angular.z = 0.5
 
             self.pub.publish(twist)
 
@@ -107,8 +107,6 @@ class LineFollowerNode(Node):
             cv2.imshow("Masques", cv2.bitwise_or(mask_red, mask_green))
             cv2.waitKey(1)
 
-        except Exception as e:
-            self.get_logger().error(f"Erreur : {e}")
     
     def scan_callback(self, msg):
         # On regarde les distances devant le robot
