@@ -1,0 +1,23 @@
+colcon build
+source install/setup.bash
+ros2 launch projet2025 projet.launch.py
+ros2 run projet line_follower
+
+ros2 launch projet2025 projet.launch.py
+
+ssh turtle@192.168.0.105
+
+zenoh-bridge2
+
+zenoh-bridge-ros2dds -e tcp/192.168.0.105:7447
+
+ros2 launch turtlebot3_bringup robot.launch.py
+
+ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.1, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}"
+
+# from sensor_msgs.msg import CompressedImage
+# import cv2
+# self.sub_img = self.create_subscription(CompressedImage, '/camera/image_raw/compressed', self.listener_callback, 10)
+# def listener_callback(self, msg):     
+# cv_image = cv2.imdecode(np.frombuffer(msg.data, np.uint8), cv2.IMREAD_COLOR)
+# h, w, _ = cv_image.shape
